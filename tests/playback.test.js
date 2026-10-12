@@ -11,7 +11,8 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 
 function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
   pageResponse, restrictedPage = false, offscreenVoices,
-  offscreenCreateError = "", offscreenSpeakError = "" } = {}) {
+  offscreenCreateError = "", offscreenSpeakError = "", focusedElement,
+  activeTabId = 7, sidePanelError = "", extensionEditing = false } = {}) {
   const listeners = {};
   const event = (name) => ({ addListener(listener) { listeners[name] = listener; } });
   const utterances = [];
@@ -22,6 +23,8 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
   const tabMessages = [];
   const badges = [];
   const injections = [];
+  const createdMenus = [];
+  const sidePanelCalls = [];
   const timeouts = new Map();
   const intervals = new Map();
   const local = { ...(preferences || {}) };
@@ -44,6 +47,7 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
         ? [{ contextType: "OFFSCREEN_DOCUMENT", documentUrl: chrome.runtime.getURL("offscreen.html") }] : [],
       onMessage: event("message"), onInstalled: event("installed"),
       sendMessage: async (message) => {
+        if (message.type === "CHECK_EDITING") return { editing: extensionEditing };
         if (message.target === "sona-offscreen") {
           offscreenMessages.push(clone(message));
           if (!offscreenContextPresent) throw new Error("Receiving end does not exist");
@@ -72,13 +76,14 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
         offscreenContextPresent = true;
       }
     },
-    tabs: { sendMessage: async (tabId, message, options) => {
+    tabs: { query: async () => [{ id: activeTabId }], sendMessage: async (tabId, message, options) => {
       tabMessages.push({ tabId, message: clone(message), options: clone(options || {}) });
-      return message.type === "READ_PAGE" ? pageResponse : undefined;
+      return ["READ_PAGE", "READ_FROM_HERE"].includes(message.type) ? pageResponse : undefined;
     } },
     scripting: { executeScript: async (options) => {
       injections.push(clone(options));
       if (restrictedPage) throw new Error("Cannot access this page");
+      if (options.func) return [{ result: options.func() }];
     } },
     storage: {
       local: { get: async () => clone(local), set: async (value) => { Object.assign(local, clone(value)); } },
@@ -90,8 +95,13 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
     },
     contextMenus: {
       onClicked: event("menu"), removeAll: (callback) => callback(),
-      create: (value, callback) => { listeners.createdMenu = value; callback(); }
+      create: (value, callback) => { createdMenus.push(clone(value)); callback(); }
     },
+    commands: { onCommand: event("command") },
+    sidePanel: { open: async (options) => {
+      sidePanelCalls.push(clone(options));
+      if (sidePanelError) throw new Error(sidePanelError);
+    } },
     tts: {
       getVoices: async () => voices || [{ voiceName: "Local voice", lang: "en-US", remote: false, eventTypes: ["end", "word"] }],
       speak(text, options, callback) {
@@ -118,6 +128,7 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
   };
   const context = vm.createContext({
     chrome, Intl, console, crypto: { randomUUID: () => `session-${stopCount}` },
+    document: { activeElement: focusedElement || { tagName: "BODY", isContentEditable: false, closest: () => null } },
     navigator: { language: "en-US" },
     setTimeout: (callback, delay) => { const id = ++timerId; timeouts.set(id, { callback, delay }); return id; },
     clearTimeout: (id) => timeouts.delete(id),
@@ -129,7 +140,7 @@ function createWorker({ voices, snapshot, preferences, rejectBroadcast = false,
   const sender = { id: chrome.runtime.id, url: chrome.runtime.getURL("popup.html") };
   return {
     chrome, utterances, broadcasts, tabMessages, injections, intervals, local, session, badges, listeners,
-    offscreenUtterances, offscreenMessages, offscreenDocuments,
+    offscreenUtterances, offscreenMessages, offscreenDocuments, createdMenus, sidePanelCalls,
     get stopCount() { return stopCount; }, get pauseCount() { return pauseCount; },
     get resumeCount() { return resumeCount; }, get platformCalls() { return platformCalls; },
     failNextSpeak(message) { nextSpeakError = message; },
@@ -521,7 +532,7 @@ test("messages reject unrelated senders and bind content sources to their own ta
 test("selection context menu creates a complete reading session", async () => {
   const worker = createWorker();
   worker.listeners.installed();
-  assert.equal(worker.listeners.createdMenu.id, "reader-read-selection");
+  assert.deepEqual(worker.createdMenus.map((menu) => menu.id), ["reader-read-selection", "reader-read-from-here"]);
   worker.listeners.menu({ menuItemId: "reader-read-selection", selectionText: "A selected sentence.", pageUrl: "https://example.com" },
     { id: 4, title: "Selection article" });
   const { state } = await worker.send({ type: "GET_STATE" });
@@ -573,4 +584,251 @@ test("selection context menu still reads restricted-page selections", async () =
   const { state } = await worker.send({ type: "GET_STATE" });
   assert.equal(state.status, "playing");
   assert.equal(state.source.text, "Restricted selected text.");
+});
+
+test("seeking snaps to a sentence, preserves playback state, and ignores old callbacks", async () => {
+  const worker = createWorker();
+  await start(worker);
+  const old = worker.utterances[0];
+  let state = (await worker.send({ type: "SEEK", charIndex: 24 })).state;
+  assert.equal(state.status, "playing");
+  assert.equal(state.charIndex, 16);
+  assert.equal(worker.utterances.at(-1).text, "Second sentence.");
+  worker.emit({ type: "end" }, old);
+  assert.equal(worker.utterances.length, 2);
+  await worker.send({ type: "PAUSE" });
+  state = (await worker.send({ type: "SEEK", charIndex: 36 })).state;
+  assert.equal(state.status, "paused");
+  assert.equal(state.charIndex, 33);
+  assert.equal(state.wordBoundary, false);
+  assert.equal(worker.utterances.length, 2);
+  await worker.send({ type: "STOP" });
+  state = (await worker.send({ type: "SEEK", charIndex: 24 })).state;
+  assert.equal(state.status, "paused");
+  assert.equal(state.charIndex, 16);
+  state = (await worker.send({ type: "SEEK", charIndex: 10000 })).state;
+  assert.equal(state.status, "finished");
+  assert.equal(state.progress, 1);
+  assert.equal(state.remainingSeconds, 0);
+  state = (await worker.send({ type: "SEEK", charIndex: -20 })).state;
+  assert.equal(state.status, "paused");
+  assert.equal(state.charIndex, 0);
+  assert.match((await worker.send({ type: "SEEK", charIndex: "next" })).error, /valid reading position/);
+});
+
+test("explicit start offsets read the containing sentence or finish at the end", async () => {
+  const worker = createWorker();
+  const state = (await start(worker, undefined, { startOffset: 24 })).state;
+  assert.equal(state.charIndex, 16);
+  assert.equal(worker.utterances[0].text, "Second sentence.");
+  const finished = (await start(worker, undefined, { startOffset: 10000 })).state;
+  assert.equal(finished.status, "finished");
+  assert.equal(worker.utterances.length, 1);
+});
+
+test("stopped article checkpoints survive a browser restart without retaining article text", async () => {
+  const first = createWorker();
+  await start(first);
+  first.emit({ type: "end" });
+  first.emit({ type: "word", charIndex: 7, length: 8 });
+  const oldSource = (await first.send({ type: "GET_STATE" })).state.source;
+  assert.equal((await first.send({ type: "STOP" })).state.charIndex, 0);
+  await first.flush();
+  assert.equal(first.local.readerPositions[0].charIndex, 23);
+  assert.equal(Object.hasOwn(first.local.readerPositions[0], "text"), false);
+  assert.equal(JSON.stringify(first.local.readerPositions).includes(oldSource.text), false);
+  const restarted = createWorker({ preferences: first.local });
+  assert.equal((await restarted.send({ type: "GET_STATE" })).state.source, null);
+  const source = { ...oldSource, id: "new-extraction-id", tabId: 20, url: `${oldSource.url}#paragraph` };
+  const { position } = await restarted.send({ type: "GET_POSITION", source });
+  assert.equal(position.charIndex, 23);
+  assert.equal(position.progress, 23 / source.text.length);
+  assert.equal(position.title, "Article");
+  assert.ok(position.updatedAt > 0);
+  const resumed = (await restarted.send({ type: "START", source, resume: true })).state;
+  assert.equal(resumed.charIndex, 16);
+  assert.equal(resumed.source.tabId, 20);
+  assert.equal(restarted.utterances[0].text, "Second sentence.");
+});
+
+test("word progress is throttled while transitions persist the latest reading position", async () => {
+  const worker = createWorker();
+  await start(worker);
+  await new Promise((resolve) => setImmediate(resolve));
+  worker.emit({ type: "word", charIndex: 6, length: 8 });
+  worker.emit({ type: "word", charIndex: 10, length: 4 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worker.local.readerPositions[0].charIndex, 0);
+  await worker.flush();
+  assert.equal(worker.local.readerPositions[0].charIndex, 10);
+  worker.emit({ type: "word", charIndex: 12, length: 2 });
+  await worker.send({ type: "PAUSE" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(worker.local.readerPositions[0].charIndex, 12);
+  const restarted = createWorker({ preferences: worker.local });
+  assert.equal((await restarted.send({ type: "GET_POSITION", source: (await worker.send({ type: "GET_STATE" })).state.source })).position.charIndex, 12);
+});
+
+test("pasted text remains playable without creating a durable article checkpoint", async () => {
+  const worker = createWorker();
+  const source = { text: "First pasted sentence. Second pasted sentence.", kind: "text", title: "Pasted text" };
+  await worker.send({ type: "START", source });
+  await worker.send({ type: "SEEK", charIndex: 30 });
+  await worker.send({ type: "PAUSE" });
+  await worker.flush();
+  assert.equal(worker.local.readerPositions, undefined);
+  assert.equal((await worker.send({ type: "GET_POSITION", source })).position, null);
+  const article = (await start(worker)).state.source;
+  await worker.send({ type: "SEEK", charIndex: 24 });
+  await worker.send({ type: "START", source: { ...source, url: article.url } });
+  await worker.send({ type: "SEEK", charIndex: 30 });
+  await worker.send({ type: "PAUSE" });
+  await worker.flush();
+  assert.equal(worker.local.readerPositions.length, 1);
+  assert.equal(worker.local.readerPositions[0].kind, "page");
+  assert.equal((await worker.send({ type: "GET_POSITION", source: article })).position.charIndex, 16);
+});
+
+test("checkpoints reject changed articles, omit finished reading, and bound history to 50 sources", async () => {
+  const worker = createWorker();
+  const original = (await start(worker)).state.source;
+  await worker.send({ type: "SEEK", charIndex: 24 });
+  await worker.send({ type: "PAUSE" });
+  assert.equal((await worker.send({ type: "GET_POSITION", source: original })).position.charIndex, 16);
+  const changed = { ...original, text: `${original.text} An added sentence.` };
+  assert.equal((await worker.send({ type: "GET_POSITION", source: changed })).position, null);
+  await worker.send({ type: "START", source: changed });
+  await worker.send({ type: "SEEK", charIndex: 24 });
+  await worker.flush();
+  assert.equal(worker.local.readerPositions.length, 1);
+  assert.equal((await worker.send({ type: "GET_POSITION", source: original })).position, null);
+  await worker.send({ type: "SEEK", charIndex: changed.text.length });
+  assert.equal((await worker.send({ type: "GET_POSITION", source: changed })).position, null);
+  for (let index = 0; index < 52; index += 1) {
+    await worker.send({ type: "START", source: { ...original, url: `https://example.com/article/${index}` } });
+    await worker.send({ type: "SEEK", charIndex: 24 });
+  }
+  await worker.flush();
+  assert.equal(worker.local.readerPositions.length, 50);
+  assert.equal(worker.local.readerPositions[0].url, "https://example.com/article/51");
+  assert.equal(worker.local.readerPositions.at(-1).url, "https://example.com/article/2");
+});
+
+test("preparing a clean reading view saves prior progress and leaves its checkpoint available", async () => {
+  const worker = createWorker();
+  const original = (await start(worker)).state.source;
+  await worker.send({ type: "SEEK", charIndex: 24 });
+  const old = worker.utterances.at(-1);
+  const same = (await worker.send({ type: "PREPARE_SOURCE", source: original })).state;
+  assert.equal(same.status, "playing");
+  assert.equal(worker.utterances.length, 2);
+  const preparedSource = { ...original, id: "new-map", tabId: 9 };
+  const prepared = (await worker.send({ type: "PREPARE_SOURCE", source: preparedSource })).state;
+  assert.equal(prepared.status, "idle");
+  assert.equal(prepared.charIndex, 0);
+  assert.equal(prepared.source.tabId, 9);
+  assert.equal((await worker.send({ type: "GET_POSITION", source: preparedSource })).position.charIndex, 16);
+  worker.emit({ type: "end" }, old);
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.status, "idle");
+  const sender = { id: worker.chrome.runtime.id, url: "https://example.com", tab: { id: 5 }, frameId: 2 };
+  const bound = (await worker.send({ type: "PREPARE_SOURCE", source: { ...original, tabId: 999 } }, sender)).state;
+  assert.equal(bound.source.tabId, 5);
+  assert.equal(bound.source.frameId, 2);
+});
+
+test("follow preferences persist independently of voices and reading estimates reflect speed", async () => {
+  const worker = createWorker();
+  assert.equal((await worker.send({ type: "GET_UI_PREFS" })).preferences.follow, true);
+  await start(worker, "One two three four five six seven eight nine ten.");
+  let state = (await worker.send({ type: "UI_PREFS", preferences: { follow: false } })).state;
+  assert.equal(state.uiPreferences.follow, false);
+  assert.equal(state.settings.rate, 1);
+  assert.equal(state.totalSeconds, 4);
+  assert.equal(state.remainingSeconds, 4);
+  await worker.send({ type: "SETTINGS", settings: { rate: 2 } });
+  worker.emit({ type: "word", charIndex: 24, length: 3 });
+  state = (await worker.send({ type: "GET_STATE" })).state;
+  assert.equal(state.totalSeconds, 2);
+  assert.equal(state.remainingSeconds, 1);
+  assert.equal(state.wordBoundary, true);
+  await worker.send({ type: "PAUSE" });
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.wordBoundary, false);
+  const restarted = createWorker({ preferences: worker.local });
+  assert.equal((await restarted.send({ type: "GET_UI_PREFS" })).preferences.follow, false);
+  assert.equal((await restarted.send({ type: "GET_STATE" })).state.settings.rate, 2);
+});
+
+test("global playback shortcuts guard focused inputs and shadow-root editors", async () => {
+  const worker = createWorker({ activeTabId: 12 });
+  await start(worker);
+  worker.listeners.command("toggle-playback");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.status, "paused");
+  assert.deepEqual(worker.injections.at(-1).target, { tabId: 12, allFrames: true });
+  worker.listeners.command("next-sentence");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.charIndex, 16);
+  worker.listeners.command("previous-sentence");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.charIndex, 0);
+  worker.listeners.command("toggle-playback");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.status, "playing");
+  for (const focusedElement of [
+    { tagName: "INPUT" }, { tagName: "TEXTAREA" }, { tagName: "DIV", isContentEditable: true },
+    { tagName: "CUSTOM-EDITOR", shadowRoot: { activeElement: { tagName: "TEXTAREA" } } }
+  ]) {
+    const editing = createWorker({ focusedElement });
+    await start(editing);
+    editing.listeners.command("toggle-playback");
+    assert.equal((await editing.send({ type: "GET_STATE" })).state.status, "playing");
+    editing.listeners.command("next-sentence");
+    assert.equal((await editing.send({ type: "GET_STATE" })).state.charIndex, 0);
+  }
+  const inaccessible = createWorker({ restrictedPage: true });
+  await start(inaccessible);
+  inaccessible.listeners.command("toggle-playback");
+  assert.equal((await inaccessible.send({ type: "GET_STATE" })).state.status, "paused");
+});
+
+test("the side panel opens inside the message gesture before asynchronous initialization", async () => {
+  const worker = createWorker();
+  const response = worker.send({ type: "OPEN_READER", windowId: 3 });
+  assert.deepEqual(worker.sidePanelCalls, [{ windowId: 3 }]);
+  assert.deepEqual(await response, { ok: true });
+  const sender = { id: worker.chrome.runtime.id, url: "https://example.com", tab: { id: 7 } };
+  assert.deepEqual(await worker.send({ type: "OPEN_READER" }, sender), { ok: true });
+  assert.deepEqual(worker.sidePanelCalls.at(-1), { tabId: 7 });
+  const rejected = createWorker({ sidePanelError: "User gesture required" });
+  assert.match((await rejected.send({ type: "OPEN_READER", windowId: 3 })).error, /User gesture required/);
+  const untrusted = { id: "other-extension", url: "https://example.com", tab: { id: 7 } };
+  assert.match((await worker.send({ type: "OPEN_READER", windowId: 3 }, untrusted)).error, /Only this extension/);
+  assert.equal(worker.sidePanelCalls.length, 2);
+});
+
+test("global shortcuts leave a focused extension editor alone", async () => {
+  const worker = createWorker({ extensionEditing: true });
+  await start(worker);
+  worker.listeners.command("toggle-playback");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.status, "playing");
+  worker.listeners.command("next-sentence");
+  assert.equal((await worker.send({ type: "GET_STATE" })).state.charIndex, 0);
+  assert.equal(worker.injections.length, 0);
+  assert.equal(worker.utterances.length, 1);
+});
+
+test("read-from-here context menu honors the captured paragraph offset and frame mapping", async () => {
+  const worker = createWorker({ pageResponse: { source: {
+    id: "paragraph-map", text: "First sentence. Second sentence. Third sentence.", kind: "page",
+    title: "Article", url: "https://example.com/frame", startOffset: 24
+  } } });
+  worker.listeners.menu({ menuItemId: "reader-read-from-here", frameId: 2 }, { id: 4 });
+  const { state } = await worker.send({ type: "GET_STATE" });
+  assert.equal(state.status, "playing");
+  assert.equal(state.source.id, "paragraph-map");
+  assert.equal(state.source.frameId, 2);
+  assert.equal(state.source.tabId, 4);
+  assert.equal(state.charIndex, 16);
+  assert.equal(worker.utterances[0].text, "Second sentence.");
+  assert.equal(worker.tabMessages.find((entry) => entry.message.type === "READ_FROM_HERE").options.frameId, 2);
+  const failure = createWorker({ pageResponse: { error: "Open Sona once on this page, then right-click a paragraph." } });
+  failure.listeners.menu({ menuItemId: "reader-read-from-here" }, { id: 4 });
+  assert.match((await failure.send({ type: "GET_STATE" })).state.error, /Open Sona once/);
+  assert.equal(failure.utterances.length, 0);
 });

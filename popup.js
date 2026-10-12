@@ -14,6 +14,10 @@ let ready = false;
 let busy = false;
 let sourceIssue = "";
 let loadGeneration = 0;
+let savedPosition = null;
+let positionGeneration = 0;
+let currentWindowId;
+let seeking = false;
 
 async function sendMessage(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -51,6 +55,26 @@ function renderSource(nextSource) {
   try { domain = new URL(source.url).hostname.replace(/^www\./, ""); } catch { /* Pasted content has no URL. */ }
   $("#source-detail").textContent = mode === "paste" ? "Paste or edit anything you’d like to hear" : `${source.kind === "selection" ? "Selected passage" : "Page article"}${domain ? ` · ${domain}` : ""}`;
   updateTextStats();
+  refreshSavedPosition();
+}
+function renderResumeOffer() {
+  const show = Boolean(savedPosition && !isActive() && ["page", "selection"].includes(source.kind));
+  $("#resume-card").hidden = !show;
+  $(".reading-card").dataset.resume = String(show);
+  $("#resume-position").textContent = `Your place is saved · ${Math.round((savedPosition?.progress || 0) * 100)}%`;
+}
+async function refreshSavedPosition() {
+  const generation = ++positionGeneration;
+  savedPosition = null;
+  renderResumeOffer();
+  if (!source.text || !source.url || !["page", "selection"].includes(source.kind)) return;
+  try {
+    const response = await sendMessage({ type: "GET_POSITION", source: { ...source, text: textInput.value } });
+    if (generation !== positionGeneration) return;
+    savedPosition = response.position;
+    renderResumeOffer();
+    if (!isActive() && savedPosition) $("#play-label").textContent = "Resume article";
+  } catch (error) { setStatus(error.message, true); }
 }
 async function saveDraft() {
   if (mode === "paste") pasteDraft = textInput.value;
@@ -73,17 +97,27 @@ function renderControlAvailability() {
 }
 function renderPlayback(state) {
   if (!state) return;
+  const wasActive = isActive();
   playback = state;
   const active = isActive();
   const paused = state.status === "paused";
-  $("#play-label").textContent = state.status === "playing" ? "Pause" : paused ? "Resume" : state.status === "finished" ? "Play again" : "Play";
+  $("#play-label").textContent = state.status === "playing" ? "Pause" : paused ? "Resume" : savedPosition ? "Resume article" : state.status === "finished" ? "Play again" : "Play";
   $("#play-icon").innerHTML = state.status === "playing" ? '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>' : '<path d="m8 5 11 7-11 7V5Z"/>';
   playButton.setAttribute("aria-label", state.status === "playing" ? "Pause reading" : paused ? "Resume reading" : "Read text aloud");
   renderControlAvailability();
   const progress = Math.round(Math.min(1, Math.max(0, state.progress || 0)) * 100);
-  $("#progress").value = progress;
+  if (!seeking) $("#progress").value = Math.round(progress * 10);
+  $("#progress").disabled = busy || !state.source?.text || state.source.text !== textInput.value;
   $("#progress-label").textContent = `${progress}%`;
-  $("#playback-label").textContent = active ? `${paused ? "Paused" : "Listening"} · passage ${state.currentIndex + 1} of ${state.totalSegments}` : state.status === "finished" ? "All done. Well listened." : "Ready when you are";
+  const remaining = Math.max(0, Math.ceil(state.remainingSeconds || 0));
+  const timeLeft = remaining < 60 ? `${remaining}s left` : `${Math.ceil(remaining / 60)}m left`;
+  $("#playback-label").textContent = active ? `${paused ? "Paused" : "Listening"} · ${timeLeft} · ${state.currentIndex + 1}/${state.totalSegments}` : state.status === "finished" ? "All done. Well listened." : "Ready when you are";
+  if (document.activeElement !== rateRange && Number.isFinite(state.settings?.rate)) {
+    rateRange.value = String(state.settings.rate);
+    $("#rate-value").textContent = `${Number(rateRange.value).toFixed(1)}×`;
+  }
+  const currentVoiceName = state.settings?.voiceName || (active ? state.voice?.voiceName : "");
+  if (currentVoiceName && document.activeElement !== voiceSelect && voices.some((voice) => voice.voiceName === currentVoiceName)) voiceSelect.value = currentVoiceName;
   if (state.status === "error") setStatus(state.error || "Could not read this text.", true);
   else if (active) setStatus(paused ? "Take your time. Your place is saved." : "Keep listening after closing this popup.");
   else if (sourceIssue) setStatus(sourceIssue, true);
@@ -92,6 +126,8 @@ function renderPlayback(state) {
   else setStatus(state.status === "finished" ? "Finished reading." : "Select a passage on the page to read just that part.");
   updateTextStats();
   updateVoiceInfo();
+  renderResumeOffer();
+  if (wasActive && !active && state.status === "idle") refreshSavedPosition();
 }
 async function loadPage() {
   stopForSourceChange();
@@ -184,7 +220,24 @@ playButton.addEventListener("click", async () => {
   if (playback.status === "paused") return command({ type: "RESUME" });
   sourceIssue = "";
   await saveDraft().catch(() => {});
-  await command({ type: "START", source: { ...source, text: textInput.value }, settings: currentSettings() });
+  await command({ type: "START", source: { ...source, text: textInput.value }, settings: currentSettings(), resume: Boolean(savedPosition) });
+});
+$("#resume-reading").addEventListener("click", () => command({ type: "START", source: { ...source, text: textInput.value }, settings: currentSettings(), resume: true }));
+$("#restart-reading").addEventListener("click", () => command({ type: "START", source: { ...source, text: textInput.value }, settings: currentSettings(), startOffset: 0 }));
+$("#progress").addEventListener("input", () => { seeking = true; });
+$("#progress").addEventListener("change", async () => {
+  const charIndex = Math.round(Number($("#progress").value) / 1000 * (playback.totalCharacters || 0));
+  seeking = false;
+  await command({ type: "SEEK", charIndex });
+});
+$("#open-reader").addEventListener("click", async () => {
+  // Send open during the click, before awaiting, to retain Chrome's user gesture.
+  const showingCurrentReading = isActive() && playback.source?.text === textInput.value;
+  const prepare = textInput.value.trim() && !showingCurrentReading
+    ? sendMessage({ type: "PREPARE_SOURCE", source: { ...source, text: textInput.value } }) : Promise.resolve();
+  const open = sendMessage({ type: "OPEN_READER", windowId: currentWindowId });
+  try { await Promise.all([prepare, open]); }
+  catch (error) { setStatus(error.message, true); }
 });
 $("#stop-button").addEventListener("click", () => command({ type: "STOP" }));
 $("#prev-button").addEventListener("click", () => command({ type: "SKIP", direction: -1 }));
@@ -210,6 +263,9 @@ textInput.addEventListener("input", () => {
   stopForSourceChange();
   source = { text: textInput.value, title: "Your text, your soundtrack", kind: "paste" };
   sourceIssue = "";
+  savedPosition = null;
+  ++positionGeneration;
+  renderResumeOffer();
   setMode("paste");
   $("#source-label").textContent = source.title;
   $("#source-detail").textContent = "Paste or edit anything you’d like to hear";
@@ -230,14 +286,34 @@ $("#help-button").addEventListener("click", () => {
   $("#help-panel").hidden = !open;
   $("#help-button").setAttribute("aria-expanded", String(open));
 });
-chrome.runtime.onMessage.addListener((message) => { if (message.type === "STATE") renderPlayback(message.state); });
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === "CHECK_EDITING") {
+    if (document.hasFocus()) {
+      const element = document.activeElement;
+      if (element && (element.matches("input, textarea, select") || element.isContentEditable)) sendResponse({ editing: true });
+    }
+    return false;
+  }
+  if (message.type !== "STATE") return;
+  if (["playing", "paused"].includes(message.state?.status) && message.state.source?.text) {
+    if (message.state.source.text === textInput.value) {
+      // A fresh extraction has a new DOM map even when its article text is equal.
+      source = { ...message.state.source };
+      if (["page", "selection"].includes(source.kind)) pageSource = { ...source };
+    } else if (message.state.sessionId !== playback.sessionId) renderSource(message.state.source);
+  }
+  renderPlayback(message.state);
+});
 chrome.tts.onVoicesChanged?.addListener(() => loadVoices().catch((error) => setStatus(error.message, true)));
 async function initialize() {
-  const [preferences, draft, response] = await Promise.all([
+  const [preferences, draft, response, currentWindow] = await Promise.all([
     chrome.storage.local.get({ rate: 1, voiceName: "" }),
     chrome.storage.session.get("sonaDraft"),
-    sendMessage({ type: "GET_STATE" })
+    sendMessage({ type: "GET_STATE" }),
+    chrome.windows.getCurrent()
   ]);
+  currentWindowId = currentWindow.id;
+  $("#open-reader").disabled = false;
   const state = response.state;
   playback = state || playback;
   const saved = draft.sonaDraft;

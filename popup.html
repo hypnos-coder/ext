@@ -13,9 +13,12 @@
           <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13v-3a7 7 0 0 1 14 0v3M5 12H4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h2V12H5Zm14 0h1a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-2V12h1ZM9 10v5m3-7v9m3-7v5"/></svg></span>
           <span>sona<span class="brand-dot">.</span></span>
         </a>
-        <button id="help-button" class="icon-button help-button" type="button" aria-label="How to use Sona" aria-expanded="false" aria-controls="help-panel">?</button>
+        <div class="header-actions">
+          <button id="open-reader" class="reader-button" type="button" title="Open full reading view" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2" y="3" width="16" height="14" rx="2"/><path d="M12 3v14M5 7h4M5 10h4"/></svg>Reader</button>
+          <button id="help-button" class="icon-button help-button" type="button" aria-label="How to use Sona" aria-expanded="false" aria-controls="help-panel">?</button>
+        </div>
       </header>
-      <div id="help-panel" class="help-panel" hidden>Open a webpage, select a passage if you like, and click Play. Use the floating player after closing this popup. For browser pages or PDFs, copy text into Paste text.</div>
+      <div id="help-panel" class="help-panel" hidden>Open a webpage, select a passage if you like, and click Play. Drag or minimize the floating player, or open Reader for a larger view. Alt+Shift+P pauses/resumes; Alt+Shift+Left/Right moves between sentences. Change shortcuts at chrome://extensions/shortcuts. For browser pages or PDFs, use Paste text.</div>
       <section class="intro">
         <div class="eyebrow"><span class="tiny-wave" aria-hidden="true">ııı</span> MAKE ROOM FOR LISTENING</div>
         <h1>Your words. Out loud.</h1>
@@ -33,6 +36,11 @@
         <label class="sr-only" for="text-input">Text to read aloud</label>
         <textarea id="text-input" spellcheck="false" maxlength="100000" placeholder="Your next good read starts here. Open a webpage, or paste something you’d like to listen to."></textarea>
         <div class="text-meta"><span id="character-count">0 words</span><span id="reading-time">Add some text to begin</span></div>
+        <div id="resume-card" class="resume-card" hidden>
+          <span id="resume-position">Your place is saved</span>
+          <button id="resume-reading" type="button">Resume</button>
+          <button id="restart-reading" type="button">Start over</button>
+        </div>
       </section>
       <div class="voice-field">
         <span class="field-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 18h6M12 18v3M5 11v1a7 7 0 0 0 14 0v-1"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg></span>
@@ -45,7 +53,7 @@
       </div>
       <section class="player" aria-label="Playback controls">
         <div class="progress-row"><span id="playback-label">Ready when you are</span><span id="progress-label">0%</span></div>
-        <progress id="progress" max="100" value="0" aria-label="Reading progress"></progress>
+        <input id="progress" class="seek-slider" type="range" min="0" max="1000" value="0" step="1" aria-label="Seek to sentence" disabled>
         <div class="controls">
           <button id="prev-button" class="skip-button" type="button" aria-label="Previous sentence" title="Previous sentence" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 5l-11 7 11 7V5Z"/></svg></button>
           <button id="play-button" class="play-button" type="button" disabled><svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span id="play-label">Play</span></button>

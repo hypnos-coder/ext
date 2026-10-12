@@ -7,6 +7,7 @@
 
   const MAX_TEXT = 100000;
   const HIGHLIGHT_NAME = "sona-current-sentence";
+  const WORD_HIGHLIGHT_NAME = "sona-current-word";
   const EXCLUDED = new Set([
     "SCRIPT", "STYLE", "NOSCRIPT", "NAV", "HEADER", "FOOTER", "ASIDE",
     "BUTTON", "FORM", "INPUT", "TEXTAREA", "SELECT", "OPTION", "IFRAME",
@@ -25,6 +26,14 @@
   let panel = null;
   let highlightStyle = null;
   let highlightedRangeKey = "";
+  let highlightedRange = null;
+  let followReading = true;
+  let followingPaused = false;
+  let programmaticScrollUntil = 0;
+  let collapsed = false;
+  let panelPosition = null;
+  let contextTarget = null;
+  let contextCaret = null;
 
   function excludedElement(element, selected) {
     if (element.hasAttribute("data-sona-reader") || element.hidden
@@ -180,33 +189,103 @@
     return { ...(best || extractTree(document.body || document.documentElement)), kind: "page" };
   }
 
+  function saveExtraction(extraction, startOffset = null) {
+    const id = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID() : `sona-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const source = { id, text: extraction.text, title: document.title || "Untitled page",
+      url: location.href, kind: extraction.kind, truncated: extraction.truncated,
+      ...(Number.isInteger(startOffset) ? { startOffset } : {}) };
+    extractions.set(id, { ...extraction, source });
+    newestExtraction = id;
+    if (extractions.size > 8) {
+      for (const key of extractions.keys()) {
+        if (key !== currentState?.source?.id && key !== id) {
+          extractions.delete(key);
+          break;
+        }
+      }
+    }
+    return { source };
+  }
+
   function readPage() {
     try {
       const extraction = extractSelection() || extractPage();
       if (!extraction.text) return { error: "This page has no readable text. Select some text or paste it into Sona." };
-      const id = typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID() : `sona-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const source = { id, text: extraction.text, title: document.title || "Untitled page",
-        url: location.href, kind: extraction.kind, truncated: extraction.truncated };
-      extractions.set(id, { ...extraction, source });
-      newestExtraction = id;
-      if (extractions.size > 8) {
-        for (const key of extractions.keys()) {
-          if (key !== currentState?.source?.id && key !== id) {
-            extractions.delete(key);
-            break;
-          }
-        }
-      }
-      return { source };
+      return saveExtraction(extraction);
     } catch {
       return { error: "Sona could not read this page. Select some text or paste it into the reader." };
     }
   }
 
+  function readFromHere(selectionText = "") {
+    try {
+      if (!contextTarget?.isConnected) {
+        const selection = extractSelection();
+        if (selection?.text && selectionText) return saveExtraction(selection, 0);
+        return { error: "Open Sona on this page once, then right-click the paragraph again." };
+      }
+      // Keep the full article and its DOM map, so previous/next and seeking can
+      // travel in both directions from the paragraph the user selected.
+      let extraction = extractPage();
+      const target = contextTarget.nodeType === Node.ELEMENT_NODE
+        ? contextTarget : contextTarget.parentElement;
+      const block = target?.closest("p, li, blockquote, h1, h2, h3, h4, h5, h6, pre, td, figcaption") || target;
+      let spans = extraction.segments.filter((span) => block?.contains(span.node));
+      if (!spans.length) {
+        extraction = { ...extractTree(document.body || document.documentElement), kind: "page" };
+        spans = extraction.segments.filter((span) => block?.contains(span.node));
+      }
+      let startOffset = spans[0]?.start;
+      if (contextCaret?.startContainer?.nodeType === Node.TEXT_NODE) {
+        const caretSpan = extraction.segments.find((span) => span.node === contextCaret.startContainer
+          && span.nodeStart <= contextCaret.startOffset && span.nodeEnd >= contextCaret.startOffset);
+        if (caretSpan) startOffset = caretSpan.start + (caretSpan.collapsed ? 0
+          : Math.min(caretSpan.end - caretSpan.start, contextCaret.startOffset - caretSpan.nodeStart));
+      }
+      if (!Number.isInteger(startOffset) && selectionText) {
+        const selection = extractSelection();
+        if (selection?.text) return saveExtraction(selection, 0);
+      }
+      if (!extraction.text) return { error: "This part of the page has no readable text." };
+      if (!Number.isInteger(startOffset)) return { error: "This part of the page is outside the readable article. Select a passage to read it aloud." };
+      return saveExtraction(extraction, startOffset);
+    } catch {
+      return { error: "Sona could not locate this paragraph. Select a passage to read it aloud." };
+    }
+  }
+
   function clearHighlight() {
-    try { CSS.highlights?.delete(HIGHLIGHT_NAME); } catch { /* Unsupported browser. */ }
+    try {
+      CSS.highlights?.delete(HIGHLIGHT_NAME);
+      CSS.highlights?.delete(WORD_HIGHLIGHT_NAME);
+    } catch { /* Unsupported browser. */ }
     highlightedRangeKey = "";
+    highlightedRange = null;
+  }
+
+  function highlightWord(state, extraction) {
+    try {
+      CSS.highlights.delete(WORD_HIGHLIGHT_NAME);
+      // The bundled synthesizer has no reliable word timings. Only render a
+      // word when the active engine explicitly reports a word boundary.
+      if (state.wordBoundary !== true || !Number.isFinite(state.wordLength) || state.wordLength <= 0) return;
+      const start = state.charIndex;
+      const end = Math.min(extraction.text.length, start + state.wordLength);
+      const spans = extraction.segments.filter((span) => span.end > start && span.start < end);
+      if (!spans.length || spans.some((span) => !span.node.isConnected
+        || span.node.data !== extraction.snapshots.get(span.node))) return;
+      const first = spans[0];
+      const last = spans[spans.length - 1];
+      const range = document.createRange();
+      range.setStart(first.node, first.collapsed ? first.nodeStart
+        : first.nodeStart + Math.max(0, start - first.start));
+      range.setEnd(last.node, last.collapsed ? last.nodeEnd
+        : last.nodeStart + Math.min(last.end - last.start, end - last.start));
+      const highlight = new Highlight(range);
+      highlight.priority = 1;
+      CSS.highlights.set(WORD_HIGHLIGHT_NAME, highlight);
+    } catch { /* The page may have replaced its text nodes. */ }
   }
 
   function sourceExtraction(source) {
@@ -228,6 +307,7 @@
     const spans = extraction.segments.filter((span) => span.end > start && span.start < end);
     if (!spans.length || spans.some((span) => !span.node.isConnected
       || span.node.data !== extraction.snapshots.get(span.node))) return clearHighlight();
+    highlightWord(state, extraction);
     if (highlightedRangeKey === rangeKey) return;
     const first = spans[0];
     const last = spans[spans.length - 1];
@@ -242,11 +322,13 @@
       if (!highlightStyle?.isConnected) {
         highlightStyle = document.createElement("style");
         highlightStyle.setAttribute("data-sona-reader", "highlight");
-        highlightStyle.textContent = `::highlight(${HIGHLIGHT_NAME}) { background-color: #e4d9ff; color: inherit; text-decoration: underline; text-decoration-color: #7054de; }`;
+        highlightStyle.textContent = `::highlight(${HIGHLIGHT_NAME}) { background-color: #e4d9ff; color: inherit; text-decoration: underline; text-decoration-color: #7054de; } ::highlight(${WORD_HIGHLIGHT_NAME}) { background-color: #bca7ff; color: inherit; }`;
         (document.head || document.documentElement).append(highlightStyle);
       }
       CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(range));
       highlightedRangeKey = rangeKey;
+      highlightedRange = range;
+      followCurrentSentence();
     } catch { clearHighlight(); }
   }
 
@@ -299,17 +381,126 @@
     }
   }
 
+  function updateFollowControls() {
+    if (!panel) return;
+    panel.follow.checked = followReading;
+    panel.back.hidden = !followReading || !followingPaused;
+    panel.compactBack.hidden = !followReading || !followingPaused;
+  }
+
+  function followCurrentSentence(force = false) {
+    if (!highlightedRange || !followReading || followingPaused
+      || (!force && currentState?.status !== "playing")) return;
+    const rects = Array.from(highlightedRange.getClientRects());
+    let target = highlightedRange.getBoundingClientRect();
+    if (!target.height || !target.width) return;
+    const height = window.innerHeight;
+    const margin = Math.min(80, height / 5);
+    // A very long sentence may cover more than one screen; follow its first
+    // line rather than continually moving a sentence the user can already see.
+    if (target.height > height - margin * 2 && rects.length) target = rects[0];
+    let ancestor = highlightedRange.startContainer.parentElement;
+    const scrollable = [];
+    while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+      const style = getComputedStyle(ancestor);
+      if (ancestor.scrollHeight > ancestor.clientHeight && /auto|scroll/.test(style.overflowY)) scrollable.push(ancestor);
+      ancestor = ancestor.parentElement;
+    }
+    for (const container of scrollable) {
+      const bounds = container.getBoundingClientRect();
+      const safe = Math.min(32, container.clientHeight / 5);
+      if (target.top < bounds.top + safe || target.bottom > bounds.bottom - safe) {
+        programmaticScrollUntil = performance.now() + 600;
+        container.scrollBy({ top: target.top + target.height / 2 - bounds.top - bounds.height / 2,
+          behavior: "instant" });
+        target = highlightedRange.getBoundingClientRect();
+        if (target.height > height - margin * 2 && rects.length) target = highlightedRange.getClientRects()[0] || target;
+      }
+    }
+    if (target.top < margin || target.bottom > height - margin) {
+      programmaticScrollUntil = performance.now() + 600;
+      window.scrollBy({ top: target.top + target.height / 2 - height / 2, behavior: "instant" });
+    }
+  }
+
+  function suspendFollowing(event) {
+    if (!followReading || !["playing", "paused"].includes(currentState?.status)
+      || event?.composedPath().some((node) => node === panel?.host)) return;
+    followingPaused = true;
+    updateFollowControls();
+  }
+
+  function resumeFollowing() {
+    followingPaused = false;
+    updateFollowControls();
+    followCurrentSentence(true);
+  }
+
+  function clampPanel() {
+    if (!panel || !panelPosition || panel.host.hidden) return;
+    const rect = panel.host.getBoundingClientRect();
+    const margin = 8;
+    panelPosition.x = Math.max(margin, Math.min(panelPosition.x, window.innerWidth - rect.width - margin));
+    panelPosition.y = Math.max(margin, Math.min(panelPosition.y, window.innerHeight - rect.height - margin));
+    panel.host.style.left = `${panelPosition.x}px`;
+    panel.host.style.top = `${panelPosition.y}px`;
+    panel.host.style.right = "auto";
+    panel.host.style.bottom = "auto";
+  }
+
+  function enableDragging(handle, host) {
+    let drag = null;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button, input, select, a")) return;
+      const rect = host.getBoundingClientRect();
+      drag = { pointer: event.pointerId, startX: event.clientX, startY: event.clientY,
+        left: rect.left, top: rect.top };
+      handle.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag || drag.pointer !== event.pointerId) return;
+      panelPosition = { x: drag.left + event.clientX - drag.startX,
+        y: drag.top + event.clientY - drag.startY };
+      clampPanel();
+    });
+    const finish = () => { drag = null; };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("lostpointercapture", finish);
+  }
+
+  function setCollapsed(value) {
+    collapsed = value;
+    if (!panel) return;
+    panel.reader.hidden = collapsed;
+    panel.compact.hidden = !collapsed;
+    clampPanel();
+    (collapsed ? panel.expand : panel.minimize).focus();
+  }
+
+  function durationLabel(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "";
+    if (seconds < 60) return "Less than a minute left";
+    const minutes = Math.ceil(seconds / 60);
+    return minutes < 60 ? `About ${minutes} min left`
+      : `About ${Math.floor(minutes / 60)} hr ${minutes % 60} min left`;
+  }
+
   function createPanel() {
     const host = element("div");
     host.setAttribute("data-sona-reader", "panel");
-    host.style.cssText = "all:initial;position:fixed;right:24px;bottom:24px;z-index:2147483647;max-width:calc(100vw - 32px);color-scheme:light;";
+    host.style.cssText = "all:initial;position:fixed;right:24px;bottom:24px;z-index:2147483647;max-width:calc(100vw - 16px);color-scheme:light;";
     const shadow = host.attachShadow({ mode: "open" });
     const style = element("style");
     style.textContent = `
       :host { color-scheme: light; }
       * { box-sizing: border-box; }
+      [hidden] { display: none !important; }
       .reader { width: 316px; max-width: calc(100vw - 32px); padding: 18px; border: 1px solid #e7e0f8; border-radius: 22px; background: #fff; color: #262136; box-shadow: 0 12px 48px #31234526, 0 3px 10px #3123450c; font: 14px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
-      .top { display: flex; align-items: center; gap: 9px; margin-bottom: 13px; }
+      .reader { max-height: calc(100vh - 16px); overflow-y: auto; }
+      .top { display: flex; align-items: center; gap: 9px; margin-bottom: 13px; cursor: grab; touch-action: none; user-select: none; }
+      .top:active, .compact:active { cursor: grabbing; }
       .brand { font-size: 14px; font-weight: 750; letter-spacing: -.3px; }
       .waves { display: flex; height: 22px; align-items: center; gap: 3px; color: #7054de; }
       .waves span { width: 3px; height: 10px; border-radius: 3px; background: currentColor; }
@@ -320,18 +511,29 @@
       .control:hover { background: #f3efff; } .control:active { transform: scale(.95); }
       .control:focus-visible { outline: 2px solid #7054de; outline-offset: 3px; }
       .control:disabled { cursor: default; opacity: .35; }
-      .close { width: 26px; height: 26px; margin-left: auto; border-radius: 8px; }
+      .close { width: 26px; height: 26px; border-radius: 8px; }
+      .minimize { margin-left: auto; }
       .title { margin: 0; max-height: 40px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-size: 14px; font-weight: 650; line-height: 20px; }
       .status { color: #948aa6; font-size: 11px; margin-top: 5px; overflow-wrap: anywhere; }
-      .progress { height: 4px; margin: 16px 0 11px; background: #eee9f7; border-radius: 4px; overflow: hidden; }
-      .fill { height: 100%; width: 0%; background: #7054de; border-radius: inherit; transition: width .2s; }
+      .progress { display: block; width: 100%; height: 18px; margin: 13px 0 0; accent-color: #7054de; cursor: pointer; }
+      .progress:focus-visible, select:focus-visible, .back:focus-visible, input:focus-visible { outline: 2px solid #7054de; outline-offset: 3px; }
+      .time { color: #948aa6; font-size: 10px; min-height: 14px; margin: 0 0 10px; }
       .bottom { display: flex; align-items: center; justify-content: space-between; }
       .label { color: #948aa6; font-size: 10px; }
       .controls { display: flex; align-items: center; gap: 3px; }
       .primary { width: 39px; height: 39px; color: #fff; background: #7054de; border-radius: 13px; }
       .primary:hover { background: #6045ce; }
+      .options { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; border-top: 1px solid #f0ecf7; padding-top: 12px; }
+      .follow-label { display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; }
+      .follow-label input { width: 14px; height: 14px; margin: 0; accent-color: #7054de; }
+      select { border: 1px solid #e7e0f8; background: #faf8ff; border-radius: 7px; padding: 5px; color: #635b76; font: inherit; font-size: 11px; cursor: pointer; }
+      .back { width: 100%; border: 0; border-radius: 9px; background: #f3efff; color: #7054de; font-size: 12px; padding: 8px; margin-top: 10px; }
+      .compact { display: flex; align-items: center; gap: 7px; width: max-content; max-width: calc(100vw - 16px); padding: 7px 9px 7px 14px; border: 1px solid #e7e0f8; border-radius: 40px; background: #fff; color: #262136; box-shadow: 0 6px 30px #31234526; font: 12px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; cursor: grab; touch-action: none; user-select: none; }
+      .compact .control { width: 31px; height: 31px; border-radius: 50%; }
+      .compact .brand { font-size: 13px; }
+      .compact-percent { color: #948aa6; font-size: 10px; }
       @media (max-width: 400px) { .reader { width: 292px; } }
-      @media (prefers-reduced-motion: reduce) { .control, .fill { transition: none; } }
+      @media (prefers-reduced-motion: reduce) { .control { transition: none; } }
     `;
     const reader = element("section", "reader");
     reader.setAttribute("aria-label", "Sona page reader");
@@ -340,23 +542,37 @@
     waves.setAttribute("aria-hidden", "true");
     for (let index = 0; index < 3; index += 1) waves.append(element("span"));
     const tag = element("span", "tag", "LISTENING");
+    const minimize = control("Minimize reader", "M5 12h14", () => setCollapsed(true), "close minimize");
     const close = control("Hide reader", "M6 6l12 12M18 6L6 18", () => {
       hiddenSession = currentSession;
       host.hidden = true;
       host.style.display = "none";
       clearHighlight();
     }, "close");
-    top.append(waves, element("span", "brand", "Sona"), tag, close);
+    top.title = "Drag to move the reader";
+    top.append(waves, element("span", "brand", "Sona"), tag, minimize, close);
     const title = element("p", "title");
     const status = element("div", "status");
     status.setAttribute("role", "status");
-    const progress = element("div", "progress");
-    progress.setAttribute("role", "progressbar");
+    const progress = element("input", "progress");
+    progress.type = "range";
+    progress.min = "0";
+    progress.max = "1000";
+    progress.step = "1";
+    progress.value = "0";
     progress.setAttribute("aria-label", "Reading progress");
-    progress.setAttribute("aria-valuemin", "0");
-    progress.setAttribute("aria-valuemax", "100");
-    const fill = element("div", "fill");
-    progress.append(fill);
+    progress.title = "Jump to a sentence";
+    let seeking = false;
+    progress.addEventListener("input", () => {
+      seeking = true;
+      progress.setAttribute("aria-valuetext", `${Math.round(Number(progress.value) / 10)} percent`);
+    });
+    progress.addEventListener("change", () => {
+      seeking = false;
+      const total = currentState?.totalCharacters || sourceExtraction(currentState?.source)?.text.length || 0;
+      if (total) sendAction("SEEK", { charIndex: Math.round(Number(progress.value) / 1000 * total) });
+    });
+    const time = element("p", "time");
     const bottom = element("div", "bottom");
     const label = element("span", "label");
     const controls = element("div", "controls");
@@ -366,10 +582,52 @@
     const stop = control("Stop reading", "M7 7h10v10H7z", () => sendAction("STOP"));
     controls.append(previous, toggle, next, stop);
     bottom.append(label, controls);
-    reader.append(top, title, status, progress, bottom);
-    shadow.append(style, reader);
+    const options = element("div", "options");
+    const followLabel = element("label", "follow-label");
+    const follow = element("input");
+    follow.type = "checkbox";
+    follow.checked = followReading;
+    follow.addEventListener("change", () => {
+      followReading = follow.checked;
+      followingPaused = false;
+      updateFollowControls();
+      sendAction("UI_PREFS", { preferences: { follow: followReading } });
+      if (followReading) followCurrentSentence(true);
+    });
+    followLabel.append(follow, element("span", "", "Follow reading"));
+    const speed = element("select");
+    speed.setAttribute("aria-label", "Reading speed");
+    for (const rate of [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3]) {
+      const option = element("option", "", `${rate}×`);
+      option.value = String(rate);
+      speed.append(option);
+    }
+    speed.addEventListener("change", () => sendAction("SETTINGS", { settings: { rate: Number(speed.value) } }));
+    const openReader = control("Open reading view", "M4 4h16v16H4zM14 4v16", () => sendAction("OPEN_READER"));
+    options.append(followLabel, speed, openReader);
+    const back = element("button", "back", "Back to reading");
+    back.type = "button";
+    back.hidden = true;
+    back.addEventListener("click", resumeFollowing);
+    reader.append(top, title, status, progress, time, bottom, options, back);
+    const compact = element("section", "compact");
+    compact.setAttribute("aria-label", "Sona compact reader");
+    compact.title = "Drag to move the reader";
+    compact.hidden = !collapsed;
+    reader.hidden = collapsed;
+    const compactPercent = element("span", "compact-percent", "0%");
+    const compactToggle = control("Pause", "M8 6v12M16 6v12", () => sendAction(currentState?.status === "paused" ? "RESUME" : "PAUSE"), "primary");
+    const compactBack = control("Back to reading", "M12 19V5M6 11l6-6 6 6", resumeFollowing);
+    compactBack.hidden = true;
+    const expand = control("Expand reader", "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", () => setCollapsed(false));
+    compact.append(element("span", "brand", "Sona"), compactPercent, compactToggle, compactBack, expand);
+    shadow.append(style, reader, compact);
     (document.body || document.documentElement).append(host);
-    return { host, title, status, progress, fill, tag, label, previous, toggle, next, stop };
+    enableDragging(top, host);
+    enableDragging(compact, host);
+    return { host, reader, compact, title, status, progress, time, tag, label, previous, toggle, next, stop,
+      minimize, expand, compactPercent, compactToggle, compactBack, back, follow, speed,
+      get seeking() { return seeking; } };
   }
 
   function renderState(state) {
@@ -380,6 +638,7 @@
     if (state.status !== "idle" && state.status !== "stopped" && session !== currentSession) {
       currentSession = session;
       hiddenSession = null;
+      followingPaused = false;
     }
     if (state.status === "idle" || state.status === "stopped") {
       clearHighlight();
@@ -391,6 +650,13 @@
     }
     if (!panel && !active && state.status !== "error") return;
     if (!panel?.host.isConnected) panel = createPanel();
+    const followChanged = typeof state.uiPreferences?.follow === "boolean"
+      && followReading !== state.uiPreferences.follow;
+    if (followChanged) {
+      followReading = state.uiPreferences.follow;
+      followingPaused = false;
+    }
+    updateFollowControls();
     const hidden = hiddenSession === session;
     panel.host.hidden = hidden;
     panel.host.style.display = hidden ? "none" : "block";
@@ -408,20 +674,60 @@
     if (panel.status.textContent !== statusText) panel.status.textContent = statusText;
     panel.tag.textContent = state.status === "paused" ? "PAUSED"
       : state.status === "finished" ? "COMPLETE" : state.status === "error" ? "ERROR" : "LISTENING";
-    panel.fill.style.width = `${percent}%`;
-    panel.progress.setAttribute("aria-valuenow", String(percent));
+    if (!panel.seeking) panel.progress.value = String(Math.round(percent * 10));
+    panel.progress.setAttribute("aria-valuetext", `${percent} percent; seeking jumps to a sentence`);
+    panel.progress.disabled = !total || state.status === "loading" || state.status === "error";
+    panel.time.textContent = state.status === "finished" ? "Finished"
+      : durationLabel(state.remainingSeconds);
+    panel.compactPercent.textContent = `${percent}%`;
+    const rate = Number(state.settings?.rate) || 1;
+    if (!Array.from(panel.speed.options).some((option) => Number(option.value) === rate)) {
+      const option = element("option", "", `${rate}×`);
+      option.value = String(rate);
+      panel.speed.append(option);
+    }
+    panel.speed.value = String(rate);
     const paused = state.status === "paused";
     const toggleLabel = paused ? "Resume" : "Pause";
-    panel.toggle.title = toggleLabel;
-    panel.toggle.setAttribute("aria-label", toggleLabel);
-    panel.toggle.replaceChildren(icon(paused ? "M8 5l11 7-11 7V5z" : "M8 6v12M16 6v12"));
-    for (const button of [panel.previous, panel.toggle, panel.next, panel.stop]) button.disabled = !active;
+    for (const button of [panel.toggle, panel.compactToggle]) {
+      button.title = toggleLabel;
+      button.setAttribute("aria-label", toggleLabel);
+      button.replaceChildren(icon(paused ? "M8 5l11 7-11 7V5z" : "M8 6v12M16 6v12"));
+    }
+    for (const button of [panel.previous, panel.toggle, panel.compactToggle, panel.next, panel.stop]) button.disabled = !active;
     if (hidden) clearHighlight(); else highlightSentence(state);
+    if (followChanged && followReading && !hidden) followCurrentSentence(true);
+    clampPanel();
   }
+
+  document.addEventListener("contextmenu", (event) => {
+    if (event.composedPath().some((node) => node === panel?.host)) return;
+    contextTarget = event.target;
+    contextCaret = null;
+    try {
+      contextCaret = document.caretRangeFromPoint?.(event.clientX, event.clientY) || null;
+    } catch { /* Read from the paragraph if caret lookup is unavailable. */ }
+  }, true);
+
+  document.addEventListener("wheel", suspendFollowing, { capture: true, passive: true });
+  document.addEventListener("touchmove", suspendFollowing, { capture: true, passive: true });
+  document.addEventListener("keydown", (event) => {
+    const editable = event.composedPath().some((node) => node instanceof Element
+      && (node.matches("input, textarea, select") || node.isContentEditable));
+    if (!editable && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) suspendFollowing(event);
+  }, true);
+  document.addEventListener("scroll", (event) => {
+    if (performance.now() >= programmaticScrollUntil) suspendFollowing(event);
+  }, { capture: true, passive: true });
+  window.addEventListener("resize", clampPanel);
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "READ_PAGE") {
       sendResponse(readPage());
+      return false;
+    }
+    if (message?.type === "READ_FROM_HERE") {
+      sendResponse(readFromHere(message.selectionText || ""));
       return false;
     }
     if (message?.type === "READER_STATE") {
@@ -431,4 +737,14 @@
     }
     return false;
   });
+
+  try {
+    chrome.runtime.sendMessage({ type: "GET_UI_PREFS" }, (response) => {
+      if (chrome.runtime.lastError) return;
+      if (typeof response?.preferences?.follow === "boolean") {
+        followReading = response.preferences.follow;
+        updateFollowControls();
+      }
+    });
+  } catch { /* A reload invalidates old content-script contexts. */ }
 })();
