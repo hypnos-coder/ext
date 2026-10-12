@@ -27,6 +27,12 @@
       kind: typeof value.kind === "string" ? value.kind.slice(0, 32) : "text",
       id: typeof value.id === "string" ? value.id.slice(0, 200) : "",
       truncated: value.truncated === true || (typeof value.text === "string" && value.text.trim().length > MAX_TEXT_LENGTH),
+      method: typeof value.method === "string" ? value.method.slice(0, 32) : "",
+      ...(value.pdf && Number.isInteger(value.pdf.totalPages) ? { pdf: {
+        totalPages: value.pdf.totalPages, startPage: value.pdf.startPage, endPage: value.pdf.endPage,
+        ocrPages: value.pdf.ocrPages || 0,
+        pages: Array.isArray(value.pdf.pages) ? value.pdf.pages.slice(0, 200).map((page) => ({ number: page.number, start: page.start, end: page.end, ocr: page.ocr === true })) : []
+      } } : {}),
       frameId: Number.isInteger(value.frameId) && value.frameId >= 0 ? value.frameId : 0,
       tabId: Number.isInteger(value.tabId) && value.tabId >= 0 ? value.tabId : null
     };

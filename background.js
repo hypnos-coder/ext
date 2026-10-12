@@ -1,6 +1,6 @@
 "use strict";
 
-importScripts("playback.js");
+importScripts("playback.js", "extraction.js");
 
 const { normalizeSettings, normalizeSource, splitSegments, chooseLocalVoice } = ReaderPlayback;
 const SESSION_KEY = "readerPlaybackSession";
@@ -34,6 +34,7 @@ let wordOffsets = [];
 let storageQueue = Promise.resolve();
 let offscreenQueue = Promise.resolve();
 let offscreenEvent = null;
+let latestExtractionRequest = null;
 
 function getState() {
   const segment = segments[currentIndex];
@@ -91,7 +92,7 @@ function checkpointFor(value) {
 }
 
 function hasArticleIdentity(value) {
-  return !!value?.text && !!value.url && ["page", "selection"].includes(value.kind);
+  return !!value?.text && !!value.url && ["page", "selection", "pdf"].includes(value.kind);
 }
 
 function storePosition(immediate = true) {
@@ -132,8 +133,8 @@ function sendOffscreen(type, payload = {}, create = true) {
     if (!await offscreenExists()) {
       if (!create) return { ok: true, missing: true };
       if (!chrome.offscreen) throw new Error("The speech player is unavailable. Reload Sona in chrome://extensions.");
-      await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["AUDIO_PLAYBACK"],
-        justification: "Play locally synthesized speech while the extension popup is closed." });
+      await chrome.offscreen.createDocument({ url: "offscreen.html", reasons: ["AUDIO_PLAYBACK", "DOM_PARSER", "BLOBS"],
+        justification: "Play speech and parse PDF/HTML documents locally, including scanned pages." });
     }
     const response = await chrome.runtime.sendMessage({ target: "sona-offscreen", type, ...payload });
     if (response?.error) throw new Error(response.error);
@@ -396,7 +397,7 @@ async function restore() {
   uiPreferences = { follow: savedSettings[UI_KEY]?.follow !== false };
   positions = Array.isArray(savedSettings[POSITION_KEY]) ? savedSettings[POSITION_KEY]
     .filter((entry) => entry && typeof entry.key === "string" && typeof entry.url === "string"
-      && entry.url && ["page", "selection"].includes(entry.kind)
+      && entry.url && ["page", "selection", "pdf"].includes(entry.kind)
       && Number.isFinite(entry.charIndex) && entry.charIndex >= 0)
     .slice(0, 50) : [];
   const snapshot = savedSession[SESSION_KEY];
@@ -601,6 +602,31 @@ function trustedSender(sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.target === "sona-extractor") return false;
+  if (["EXTRACT_TAB", "PDF_EXTRACT", "SCAN_TAB", "CANCEL_EXTRACT"].includes(message?.type)) {
+    if (!trustedSender(sender) || !sender.url.startsWith(chrome.runtime.getURL(""))) {
+      sendResponse({ error: "Open Sona to extract a document." }); return false;
+    }
+    const ensure = () => sendOffscreen("GET_VOICES");
+    let task;
+    if (message.type !== "CANCEL_EXTRACT") latestExtractionRequest = message.requestId;
+    else if (latestExtractionRequest === message.requestId) latestExtractionRequest = null;
+    if (message.type === "EXTRACT_TAB") task = SonaExtraction.extractTab(message, ensure);
+    else if (message.type === "PDF_EXTRACT") task = SonaExtraction.pdf(message, ensure);
+    else if (message.type === "SCAN_TAB") task = SonaExtraction.scanTab(message, ensure);
+    else task = chrome.runtime.sendMessage({ target: "sona-extractor", type: "CANCEL_EXTRACT", requestId: message.requestId });
+    task.then(async (result) => {
+      if (result?.source && latestExtractionRequest === message.requestId) {
+        try {
+          const saved = await chrome.storage.session.get("sonaDraft");
+          await chrome.storage.session.set({ sonaDraft: { source: result.source,
+            pasteDraft: saved.sonaDraft?.pasteDraft || "", mode: "page" } });
+        } catch { /* Storage failure must not discard successfully read text. */ }
+      }
+      sendResponse(result);
+    }, (error) => sendResponse({ error: error.message || "Document extraction failed." }));
+    return true;
+  }
   if (message?.target === "sona-offscreen") return false;
   if (message?.type === "OFFSCREEN_TTS_EVENT") {
     if (sender.id === chrome.runtime.id && sender.url === chrome.runtime.getURL("offscreen.html")
@@ -637,6 +663,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   task.then(sendResponse, (failure) => sendResponse({ error: failure.message || "The reader could not complete that action." }));
   return true;
 });
+
+chrome.webRequest?.onHeadersReceived.addListener((details) => {
+  if (details.responseHeaders?.some((header) => header.name.toLowerCase() === "content-type"
+      && /application\/pdf/iu.test(header.value || ""))) SonaExtraction.remember(details.tabId, details.url, details);
+}, { urls: ["<all_urls>"] }, ["responseHeaders"]);
+chrome.webNavigation?.onBeforeNavigate?.addListener((details) => {
+  if (details.frameId === 0) SonaExtraction.forget(details.tabId);
+});
+chrome.tabs.onRemoved?.addListener((tabId) => SonaExtraction.forget(tabId));
 
 chrome.runtime.onInstalled.addListener(() => {
   if (!chrome.contextMenus) return;

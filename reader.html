@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Sona · Reading view</title>
     <link rel="stylesheet" href="reader.css">
+    <link rel="stylesheet" href="documents.css">
   </head>
   <body>
     <main class="reader-shell">
@@ -12,6 +13,7 @@
         <div class="brand"><img src="icons/sona.svg" alt="" width="32" height="32"><div>sona<span>.</span><small>Reading view</small></div></div>
         <button id="load-page" class="quiet-button" type="button" title="Load the current page">Load page</button>
       </header>
+      <div id="document-tools"></div>
       <div class="appearance-controls" aria-label="Reading appearance">
         <label class="text-size-label" for="text-size">Aa <select id="text-size" aria-label="Reading text size"><option value="16">16</option><option value="18">18</option><option value="20" selected>20</option><option value="24">24</option></select></label>
         <button id="theme-toggle" class="quiet-button" type="button" aria-pressed="false">Dark</button>
@@ -57,6 +59,7 @@
       </footer>
     </main>
     <script src="playback.js"></script>
+    <script src="documents.js"></script>
     <script src="reader.js"></script>
   </body>
 </html>

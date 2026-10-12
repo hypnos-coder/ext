@@ -25,6 +25,11 @@
   let savedPosition = null;
   let positionGeneration = 0;
   let preferences = { textSize: 20, dark: false };
+  const documentLoader = SonaDocuments.create({ mount: $("#document-tools"), setStatus,
+    beforeLoad() { $("#load-page").disabled = true; },
+    afterLoad() { $("#load-page").disabled = false; },
+    async onSource(nextSource) { await prepareSource(nextSource); $("#paste-section").open = false; }
+  });
 
   function setStatus(message = "", error = false) {
     $("#status").textContent = message;
@@ -72,6 +77,7 @@
   function renderSource(nextSource) {
     if (sameSource(source, nextSource)) { source = { ...nextSource }; return; }
     source = nextSource?.text ? ReaderPlayback.normalizeSource(nextSource) : null;
+    documentLoader.setSource(source);
     currentSentence = -1;
     currentWord = "";
     manuallyScrolled = false;
@@ -108,7 +114,7 @@
     try { domain = new URL(source?.url).hostname.replace(/^www\./u, ""); } catch { /* Pasted text has no domain. */ }
     const count = sourceWordCount = wordCount(source?.text);
     $("#article-detail").textContent = source
-      ? `${domain || (source.kind === "selection" ? "Selected text" : "Your text")} · ${count.toLocaleString()} ${count === 1 ? "word" : "words"}${source.truncated ? " · First 100,000 characters" : ""}`
+      ? `${source.kind === "pdf" ? `PDF pages ${source.pdf?.startPage || 1}–${source.pdf?.endPage || source.pdf?.totalPages || ""}${domain ? ` · ${domain}` : ""}` : domain || (source.kind === "selection" ? "Selected text" : "Your text")} · ${count.toLocaleString()} ${count === 1 ? "word" : "words"}${source.truncated ? source.kind === "pdf" ? " · Extraction limited" : " · First 100,000 characters" : ""}`
       : "Listen and follow along at your own pace.";
     scrollArea.scrollTop = 0;
   }
@@ -289,14 +295,11 @@
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error("No active page found. Paste text above to listen.");
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
-      const response = await chrome.tabs.sendMessage(tab.id, { type: "READ_PAGE" });
-      if (response?.error) throw new Error(response.error);
-      if (!response?.source?.text?.trim()) throw new Error("No readable text found. Select a passage on the page or paste text above.");
+      const response = await documentLoader.loadTab(tab.id);
+      if (!response) return;
       if (generation !== loadGeneration) return;
-      await prepareSource({ ...response.source, tabId: tab.id });
       $("#paste-section").open = false;
-      setStatus("Click a sentence to read from there.");
+      if (response.source.kind !== "pdf") setStatus("Click a sentence to read from there.");
     } catch (error) {
       if (generation !== loadGeneration) return;
       const message = /Cannot access|Missing host permission|Cannot read|extensions gallery|chrome:\/\//iu.test(error.message)
@@ -390,6 +393,7 @@
     $("#read-paste").disabled = !count;
   });
   $("#read-paste").addEventListener("click", async () => {
+    if (documentLoader.busy) documentLoader.cancel();
     const text = $("#paste-input").value.trim();
     if (!text || busy) return;
     ++loadGeneration;

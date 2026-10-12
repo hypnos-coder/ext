@@ -187,6 +187,12 @@ async function run() {
   let popup = await browser.context.newPage();
   await popup.goto(`chrome-extension://${browser.extensionId}/popup.html`);
   await popup.locator('#text-input').waitFor();
+  // A popup opened as a test tab changes Chrome's active tab. Restore the
+  // article and finish loading through the UI before starting via the harness.
+  await article.bringToFront();
+  await popup.locator('#load-page').click();
+  await popup.waitForFunction(() => document.querySelector('#text-input').value.includes('Passage 24 follows')
+    && !document.querySelector('#play-button').disabled);
   let source = await sourceFor(popup, article);
   assert.ok(source.text.includes('Passage 24 follows'));
   await send(popup, { type: 'START', source, settings: { rate: 1, voiceName: 'Sona reader test voice' } });

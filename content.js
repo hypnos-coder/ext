@@ -147,7 +147,13 @@
       const block = BLOCKS.has(node.tagName);
       if (block || node.tagName === "BR") builder.separator(true);
       if (node.tagName === "BR") return;
-      for (const child of node.childNodes) visit(child, inLink || node.tagName === "A");
+      if (node.tagName === "SLOT" && node.assignedNodes?.().length) {
+        for (const child of node.assignedNodes({ flatten: true })) visit(child, inLink);
+      } else if (node.shadowRoot) {
+        for (const child of node.shadowRoot.childNodes) visit(child, inLink);
+      } else {
+        for (const child of node.childNodes) visit(child, inLink || node.tagName === "A");
+      }
       if (block) builder.separator(true);
     }
     visit(root);
@@ -174,6 +180,8 @@
   }
 
   function extractPage() {
+    const article = readableArticle();
+    if (article?.text.length >= 120) return { ...article, kind: "page", method: "article" };
     let best = null;
     let bestScore = 0;
     const candidates = document.querySelectorAll("article, main, [role='main'], [itemprop='articleBody']");
@@ -189,11 +197,100 @@
     return { ...(best || extractTree(document.body || document.documentElement)), kind: "page" };
   }
 
+  function readableArticle() {
+    if (typeof Readability !== "function" || !document.body || document.body.childElementCount > 20000) return null;
+    try {
+      const clone = document.cloneNode(true);
+      const live = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      const copied = clone.createTreeWalker(clone.body, NodeFilter.SHOW_TEXT);
+      const originals = []; const copies = [];
+      while (live.nextNode()) originals.push(live.currentNode);
+      while (copied.nextNode()) copies.push(copied.currentNode);
+      if (originals.length > 30000 || originals.length !== copies.length) return null;
+      const textNodes = new Map();
+      for (let i = 0; i < originals.length; i++) {
+        const original = originals[i]; const copy = copies[i];
+        let excluded = false;
+        for (let parent = original.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+          if (excludedElement(parent, false)) { excluded = true; break; }
+        }
+        if (excluded) { copy.remove(); continue; }
+        if (!copy.data.trim()) continue;
+        const span = clone.createElement("span");
+        span.dataset.sonaText = String(i);
+        copy.replaceWith(span); span.append(copy);
+        textNodes.set(String(i), original);
+      }
+      const article = new Readability(clone, { charThreshold: 120, keepClasses: true, maxElemsToParse: 60000 }).parse();
+      if (!article?.content) return null;
+      const template = document.createElement("template");
+      template.innerHTML = article.content;
+      const builder = createBuilder(); const used = new Set();
+      function visit(node) {
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
+        const original = textNodes.get(node.dataset.sonaText);
+        if (original) {
+          if (!used.has(original)) { builder.text(original, 0, original.data.length, Boolean(original.parentElement?.closest("a"))); used.add(original); }
+          return;
+        }
+        const block = BLOCKS.has(node.tagName);
+        if (block || node.tagName === "BR") builder.separator(true);
+        for (const child of node.children) visit(child);
+        if (block) builder.separator(true);
+      }
+      for (const child of template.content.children) visit(child);
+      const result = builder.finish();
+      if (result.text.length < (article.textContent?.trim().length || 0) * .65) return null;
+      return result;
+    } catch { return null; }
+  }
+
+  function pdfCandidates() {
+    const result = []; const seen = new Set();
+    const add = (value, element, embedded, title) => {
+      if (!value) return;
+      try {
+        let url = new URL(value, document.baseURI);
+        for (const name of ["file", "url", "src", "pdf", "document"]) {
+          const nested = url.searchParams.get(name);
+          if (nested && name === "file" && /pdf|viewer/iu.test(url.pathname)) { url = new URL(nested, document.baseURI); break; }
+          if (nested && (/\.pdf(?:$|[?#])/iu.test(nested) || /^(blob:|data:application\/pdf)/iu.test(nested))) { url = new URL(nested, document.baseURI); break; }
+        }
+        if (!["http:", "https:", "file:", "blob:", "data:"].includes(url.protocol) || seen.has(url.href)) return;
+        if (!embedded && !/\.pdf(?:$|[?#])/iu.test(url.href) && !/application\/pdf/iu.test(element?.type || "")) return;
+        if (embedded && !/\.pdf(?:$|[?#])/iu.test(url.href) && !/^(blob:|data:application\/pdf)/iu.test(url.href)
+          && !/application\/pdf/iu.test(element?.type || "") && !/pdf|document-viewer|file-viewer/iu.test(element?.src || element?.data || "")) return;
+        const rect = element?.getBoundingClientRect();
+        const score = embedded && rect ? Math.min(1, Math.max(0, Math.min(rect.right, innerWidth) - Math.max(0, rect.left))
+          * Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(0, rect.top)) / Math.max(1, innerWidth * innerHeight)) : 0;
+        seen.add(url.href); result.push({ url: url.href, embedded, score, title: title?.trim().slice(0, 160) || "" });
+      } catch { /* Not a document URL. */ }
+    };
+    const roots = [document];
+    for (let i = 0; i < roots.length && i < 100; i++) {
+      for (const node of roots[i].querySelectorAll("*")) if (node.shadowRoot) roots.push(node.shadowRoot);
+    }
+    for (const element of roots.flatMap((root) => Array.from(root.querySelectorAll("iframe[src], embed[src], object[data]")))) {
+      add(element.src || element.data, element, true, element.title || element.getAttribute("aria-label"));
+    }
+    for (const link of roots.flatMap((root) => Array.from(root.querySelectorAll("a[href]")))) add(link.href, link, false, link.textContent);
+    const app = document.querySelector("#viewerContainer .textLayer, .pdfViewer .textLayer");
+    if (app) {
+      const url = new URL(location.href);
+      const address = url.searchParams.get("file") || url.searchParams.get("url");
+      if (address) add(address, app, true, document.title);
+      // A PDF.js viewer may already hold bytes loaded through an API rather
+      // than expose a downloadable URL. The coordinator can use getData().
+      else if (!seen.has(url.href)) result.push({ url: url.href, embedded: true, score: 1, viewer: true, title: document.title });
+    }
+    return result.slice(0, 30);
+  }
+
   function saveExtraction(extraction, startOffset = null) {
     const id = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID() : `sona-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const source = { id, text: extraction.text, title: document.title || "Untitled page",
-      url: location.href, kind: extraction.kind, truncated: extraction.truncated,
+      url: location.href, kind: extraction.kind, truncated: extraction.truncated, method: extraction.method || "dom",
       ...(Number.isInteger(startOffset) ? { startOffset } : {}) };
     extractions.set(id, { ...extraction, source });
     newestExtraction = id;
@@ -205,13 +302,15 @@
         }
       }
     }
-    return { source };
+    return { source, pdfCandidates: pdfCandidates(), quality: extraction.method === "article" ? 1.2 : 1,
+      isPdf: document.contentType === "application/pdf", url: location.href, title: document.title };
   }
 
-  function readPage() {
+  function readPage(mode = "auto") {
     try {
-      const extraction = extractSelection() || extractPage();
-      if (!extraction.text) return { error: "This page has no readable text. Select some text or paste it into Sona." };
+      const extraction = ["page", "pdf"].includes(mode) ? extractPage() : extractSelection() || extractPage();
+      if (!extraction.text) return { error: "This page has no readable text. Select some text or choose a detected PDF.", pdfCandidates: pdfCandidates(),
+        isPdf: document.contentType === "application/pdf", url: location.href, title: document.title };
       return saveExtraction(extraction);
     } catch {
       return { error: "Sona could not read this page. Select some text or paste it into the reader." };
@@ -723,7 +822,7 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "READ_PAGE") {
-      sendResponse(readPage());
+      sendResponse(readPage(message.mode));
       return false;
     }
     if (message?.type === "READ_FROM_HERE") {
