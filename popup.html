@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sona · Read aloud</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header class="app-header">
+        <a class="brand" href="popup.html" aria-label="Sona home">
+          <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13v-3a7 7 0 0 1 14 0v3M5 12H4a1 1 0 0 0-1 1v4a1 1 0 0 0 1 1h2V12H5Zm14 0h1a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-2V12h1ZM9 10v5m3-7v9m3-7v5"/></svg></span>
+          <span>sona<span class="brand-dot">.</span></span>
+        </a>
+        <button id="help-button" class="icon-button help-button" type="button" aria-label="How to use Sona" aria-expanded="false" aria-controls="help-panel">?</button>
+      </header>
+      <div id="help-panel" class="help-panel" hidden>Open a webpage, select a passage if you like, and click Play. Use the floating player after closing this popup. For browser pages or PDFs, copy text into Paste text.</div>
+      <section class="intro">
+        <div class="eyebrow"><span class="tiny-wave" aria-hidden="true">ııı</span> MAKE ROOM FOR LISTENING</div>
+        <h1>Your words. Out loud.</h1>
+      </section>
+      <div class="source-tabs" role="group" aria-label="Text source">
+        <button id="page-mode" class="source-tab active" type="button" aria-pressed="true"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="3"/><path d="M3 7h14M6 5h.01M8 5h.01"/></svg>This page</button>
+        <button id="paste-mode" class="source-tab" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 4H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><rect x="7" y="2" width="6" height="4" rx="1"/><path d="M7 10h6M7 14h4"/></svg>Paste text</button>
+      </div>
+      <section class="reading-card" aria-label="Reading content">
+        <div class="source-info">
+          <div class="document-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Zm0 0v6h6M8 13h8M8 17h5"/></svg></div>
+          <div class="source-copy"><h2 id="source-label">Finding your page…</h2><p id="source-detail">Selected text or the main article</p></div>
+          <button id="load-page" class="icon-button reload-button" type="button" aria-label="Reload text from current page" title="Reload page text"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6 6 0 1 0 .1 4M16 3v5h-5"/></svg></button>
+        </div>
+        <label class="sr-only" for="text-input">Text to read aloud</label>
+        <textarea id="text-input" spellcheck="false" maxlength="100000" placeholder="Your next good read starts here. Open a webpage, or paste something you’d like to listen to."></textarea>
+        <div class="text-meta"><span id="character-count">0 words</span><span id="reading-time">Add some text to begin</span></div>
+      </section>
+      <div class="voice-field">
+        <span class="field-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 18h6M12 18v3M5 11v1a7 7 0 0 0 14 0v-1"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg></span>
+        <div class="voice-copy"><label for="voice-select">Reading voice</label><select id="voice-select"><option value="">Loading voices…</option></select></div>
+        <span id="voice-badge" class="local-badge">DEVICE</span>
+      </div>
+      <div class="speed-field">
+        <label for="rate-range">Listening speed</label><output id="rate-value" for="rate-range">1.0×</output>
+        <div class="speed-slider"><span>0.5×</span><input id="rate-range" type="range" min="0.5" max="3" step="0.1" value="1" aria-label="Listening speed"><span>3×</span></div>
+      </div>
+      <section class="player" aria-label="Playback controls">
+        <div class="progress-row"><span id="playback-label">Ready when you are</span><span id="progress-label">0%</span></div>
+        <progress id="progress" max="100" value="0" aria-label="Reading progress"></progress>
+        <div class="controls">
+          <button id="prev-button" class="skip-button" type="button" aria-label="Previous sentence" title="Previous sentence" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 5l-11 7 11 7V5Z"/></svg></button>
+          <button id="play-button" class="play-button" type="button" disabled><svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span id="play-label">Play</span></button>
+          <button id="next-button" class="skip-button" type="button" aria-label="Next sentence" title="Next sentence" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 5l11 7-11 7V5Z"/></svg></button>
+          <button id="stop-button" class="icon-button stop-button" type="button" aria-label="Stop reading" title="Stop reading" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+        </div>
+      </section>
+      <p id="status" class="status" role="status" aria-live="polite">Loading your reader…</p>
+      <footer><span class="privacy-dot" aria-hidden="true"></span><span id="voice-note">Local voices. No account. Just listen.</span></footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

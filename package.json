@@ -1,0 +1,13 @@
+{
+  "name": "sona-chrome-reader",
+  "version": "1.2.0",
+  "private": true,
+  "description": "A standalone Manifest V3 text-to-speech extension. No build step required.",
+  "scripts": {
+    "check": "node scripts/check.cjs",
+    "test": "node tests/playback.test.js && node tests/offscreen.test.js",
+    "test:browser": "node tests/browser-smoke.cjs",
+    "test:fallback": "node tests/fallback-browser.cjs"
+  },
+  "engines": { "node": ">=18" }
+}

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>A quieter way to read — Reader fixture</title>
+    <style>
+      body { font: 18px/1.7 Georgia, serif; margin: 0 auto; max-width: 780px; padding: 32px; }
+      nav, footer { font: 14px/1.5 sans-serif; }
+      article { margin: 36px 0; }
+      .visually-hidden { display: none; }
+    </style>
+  </head>
+  <body>
+    <nav>Navigation words must not enter article extraction.</nav>
+    <div hidden>
+      <article><p>Hidden-parent candidate words must not enter article extraction. This deliberately long hidden article resembles a useful story but belongs to an invisible ancestor. Its child article does not have a hidden attribute of its own. A reader should choose the visible story even when invisible content has more characters. This deliberately long hidden article resembles a useful story but belongs to an invisible ancestor. Its child article does not have a hidden attribute of its own. A reader should choose the visible story even when invisible content has more characters. This deliberately long hidden article resembles a useful story but belongs to an invisible ancestor. Its child article does not have a hidden attribute of its own. A reader should choose the visible story even when invisible content has more characters. This deliberately long hidden article resembles a useful story but belongs to an invisible ancestor. Its child article does not have a hidden attribute of its own. A reader should choose the visible story even when invisible content has more characters.</p></article>
+    </div>
+    <main>
+      <article>
+        <h1>The joy of listening</h1>
+        <h2>A quieter way to read</h2>
+        <p id="inline-paragraph">A familiar voice turns a busy page into a calmer experience. Gentle pacing and thoughtful <em>pauses help listeners</em> follow each idea.</p>
+        <p id="second-paragraph">Reading aloud makes room for curiosity. A <a href="#notes">short link</a> and a <strong>clear emphasis</strong> remain part of the story.</p>
+        <p id="third-paragraph">This final paragraph checks that moving to the next sentence preserves the position of every word.</p>
+        <p hidden>Hidden words must not enter article extraction.</p>
+        <p aria-hidden="true">Accessible-hidden words must not enter article extraction.</p>
+        <p class="visually-hidden">Display-none words must not enter article extraction.</p>
+        <button type="button">Subscribe button words must not enter article extraction.</button>
+        <input aria-label="Example input" value="Input value must not enter article extraction.">
+      </article>
+    </main>
+    <footer>Footer words must not enter article extraction.</footer>
+  </body>
+</html>
