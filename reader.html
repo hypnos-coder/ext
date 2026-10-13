@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sona · Reading view</title>
+    <link rel="stylesheet" href="reader.css">
+    <link rel="stylesheet" href="documents.css">
+  </head>
+  <body>
+    <main class="reader-shell">
+      <header class="reader-header">
+        <div class="brand"><img src="icons/sona.svg" alt="" width="32" height="32"><div>sona<span>.</span><small>Reading view</small></div></div>
+        <button id="load-page" class="quiet-button" type="button" title="Load the current page">Load page</button>
+      </header>
+      <div id="document-tools"></div>
+      <div class="appearance-controls" aria-label="Reading appearance">
+        <label class="text-size-label" for="text-size">Aa <select id="text-size" aria-label="Reading text size"><option value="16">16</option><option value="18">18</option><option value="20" selected>20</option><option value="24">24</option></select></label>
+        <button id="theme-toggle" class="quiet-button" type="button" aria-pressed="false">Dark</button>
+        <label class="follow-label"><input id="follow-reading" type="checkbox" checked> Follow reading</label>
+      </div>
+      <section class="source-header" aria-labelledby="article-title">
+        <h1 id="article-title">Your next good read</h1>
+        <p id="article-detail">Listen and follow along at your own pace.</p>
+        <div id="resume-banner" class="resume-banner" hidden>
+          <span id="resume-detail">Your place is saved.</span>
+          <div><button id="resume-saved" class="small-button" type="button">Resume</button><button id="start-over" class="quiet-button" type="button">Start over</button></div>
+        </div>
+      </section>
+      <details id="paste-section" class="paste-section">
+        <summary>Paste your own text</summary>
+        <label class="sr-only" for="paste-input">Text to read aloud</label>
+        <textarea id="paste-input" placeholder="Paste an article, notes, or anything you’d like to hear…" maxlength="100000" rows="5"></textarea>
+        <div class="paste-actions"><span id="paste-count">0 words</span><button id="read-paste" class="small-button" type="button" disabled>Read text</button></div>
+      </details>
+      <div class="reading-zone">
+        <div id="article-scroll" class="article-scroll" tabindex="0" aria-label="Article text">
+          <div id="empty-state" class="empty-state"><span aria-hidden="true">Aa</span><h2>A little space to listen.</h2><p>Load a page or paste text above. Click any sentence to read from there.</p></div>
+          <article id="article-text" hidden aria-labelledby="article-title"></article>
+        </div>
+        <button id="back-to-reading" class="back-to-reading" type="button" hidden>↓ Back to reading</button>
+      </div>
+      <footer class="player">
+        <div class="progress-meta"><span id="playback-label">Ready when you are</span><span id="remaining-time">0% · 0 min left</span></div>
+        <label class="sr-only" for="seek-progress">Reading position</label>
+        <input id="seek-progress" class="seek-progress" type="range" min="0" max="1000" step="1" value="0" disabled>
+        <div class="transport" aria-label="Playback controls">
+          <button id="prev-button" class="icon-button" type="button" aria-label="Previous sentence" title="Previous sentence" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 6 8 12l10 6V6Z"/></svg></button>
+          <button id="play-button" class="play-button" type="button" disabled><svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg><span id="play-label">Play</span></button>
+          <button id="next-button" class="icon-button" type="button" aria-label="Next sentence" title="Next sentence" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l10 6-10 6V6Z"/></svg></button>
+          <button id="stop-button" class="icon-button stop-button" type="button" aria-label="Stop reading" title="Stop reading" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h10v10H7z"/></svg></button>
+        </div>
+        <div class="speech-settings">
+          <label for="voice-select">Voice<select id="voice-select" disabled><option value="">Loading voices…</option></select></label>
+          <label class="speed-label" for="rate-select">Speed<select id="rate-select"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="1.75">1.75×</option><option value="2">2×</option><option value="2.5">2.5×</option><option value="3">3×</option></select></label>
+        </div>
+        <p id="voice-note" class="voice-note">Speech stays on your device with local voices.</p>
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </footer>
+    </main>
+    <script src="playback.js"></script>
+    <script src="documents.js"></script>
+    <script src="reader.js"></script>
+  </body>
+</html>
